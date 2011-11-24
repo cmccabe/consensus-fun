@@ -1,0 +1,6 @@
+cscope.files
+cscope.out
+*.swp
+*.swo
+*.pyc
+*~
