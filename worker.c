@@ -4,6 +4,7 @@
  * This is licensed under the Apache License, Version 2.0.  See file COPYING.
  */
 
+#include "tree.h"
 #include "worker.h"
 
 #include <errno.h>
@@ -136,37 +137,124 @@ void* worker_main(void *v)
 	return ret;
 }
 
-int worker_init(void)
+static int worker_msg_compare(const struct worker_msg *ma,
+				const struct worker_msg *mb)
+{
+	if (ma->defer_until.tv_sec < mb->defer_until.tv_sec)
+		return -1;
+	else if (ma->defer_until.tv_sec > mb->defer_until.tv_sec)
+		return 1;
+	else if (ma->defer_until.tv_nsec < mb->defer_until.tv_nsec)
+		return -1;
+	else if (ma->defer_until.tv_nsec > mb->defer_until.tv_nsec)
+		return 1;
+	else if ((uintptr_t)ma < (uintptr_t)mb)
+		return -1;
+	else if ((uintptr_t)ma > (uintptr_t)mb)
+		return 1;
+	return 0;
+}
+
+RB_HEAD(defer_msg, worker_msg);
+RB_GENERATE(defer_msg, worker_msg, defer_entry, worker_msg_compare);
+/** deferred messages, sorted by wakeup time */
+static struct defer_msg g_deferred;
+/** lock protecting g_deferred */
+static pthread_mutex_t g_deferred_lock;
+/** condition variable do_deferred_work uses to wait for changes in
+ * g_deferred */
+static pthread_cond_t g_deferred_cond;
+/** Thread that handles sending deferred messages */
+static pthread_t g_deferred_msg_thread;
+
+static void *run_deferred_msg_thread(void *v __attribute__((unused)))
+{
+	struct worker_msg *m;
+	struct timespec cur;
+
+	pthread_mutex_lock(&g_deferred_lock);
+	while (1) {
+		m = RB_MIN(defer_msg, &g_deferred);
+		if (!m) {
+			pthread_cond_wait(&g_deferred_cond, &g_deferred_lock);
+			continue;
+		}
+		clock_gettime(CLOCK_REALTIME, &cur);
+		if ((m->defer_until.tv_sec < cur.tv_sec) &&
+				(m->defer_until.tv_nsec < cur.tv_nsec)) {
+			RB_REMOVE(defer_msg, &g_deferred, m);
+			pthread_mutex_unlock(&g_deferred_lock);
+			worker_sendmsg_or_free(m->dst, m);
+			pthread_mutex_lock(&g_deferred_lock);
+			continue;
+		}
+		pthread_cond_timedwait(&g_deferred_cond, &g_deferred_lock,
+				&m->defer_until);
+	}
+	return NULL;
+}
+
+void worker_sendmsg_deferred(struct worker *w, void *m,
+			const struct timespec *ts)
+{
+	struct worker_msg *msg = (struct worker_msg*)m;
+
+	msg->dst = w;
+	msg->defer_until.tv_sec = ts->tv_sec;
+	msg->defer_until.tv_nsec = ts->tv_nsec;
+	pthread_mutex_lock(&g_deferred_lock);
+	RB_INSERT(defer_msg, &g_deferred, msg);
+	if (RB_MIN(defer_msg, &g_deferred) == msg)
+		pthread_cond_signal(&g_deferred_cond);
+	pthread_mutex_unlock(&g_deferred_lock);
+}
+
+void worker_sendmsg_deferred_ms(struct worker *w, void *m, int ms)
+{
+	struct timespec ts;
+	int s;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	s = ms / 1000;
+	ts.tv_sec += s;
+	ms -= (s * 1000);
+	ts.tv_nsec += (ms * 1000);
+	if (ts.tv_nsec > 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+	worker_sendmsg_deferred(w, m, &ts);
+}
+
+void worker_init(void)
 {
 	int ret, i;
 	memset(g_workers, 0, sizeof(struct worker) * MAX_WORKERS);
+	RB_INIT(&g_deferred);
+	ret = pthread_mutex_init(&g_deferred_lock, NULL);
+	if (ret)
+		abort();
+	ret = pthread_cond_init(&g_deferred_cond, NULL);
+	if (ret)
+		abort();
+	ret = pthread_create(&g_deferred_msg_thread, NULL,
+		run_deferred_msg_thread, NULL);
+	if (ret)
+		abort();
 	pthread_mutex_init(&g_next_free_worker_lock, NULL);
 	for (i = 0; i < MAX_WORKERS; ++i) {
 		ret = pthread_mutex_init(&g_workers[i].lock, NULL);
-		if (ret) {
-			for (--i; i > 0; --i) {
-				pthread_mutex_destroy(&g_workers[i].lock);
-			}
-			pthread_mutex_destroy(&g_next_free_worker_lock);
-			return ret;
-		}
+		if (ret)
+			abort();
 		ret = pthread_cond_init(&g_workers[i].cond, NULL);
-		if (ret) {
-			pthread_mutex_destroy(&g_workers[i].lock);
-			for (--i; i > 0; --i) {
-				pthread_mutex_destroy(&g_workers[i].lock);
-				pthread_cond_destroy(&g_workers[i].cond);
-			}
-			pthread_mutex_destroy(&g_next_free_worker_lock);
-			return ret;
-		}
+		if (ret)
+			abort();
 	}
 	for (i = 0; i < MAX_WORKERS; ++i) {
 		g_workers[i].next_free_worker = &g_workers[i + 1];
 	}
 	g_next_free_worker = &g_workers[0];
 	g_workers[MAX_WORKERS - 1].next_free_worker = NULL;
-	return 0;
 }
 
 struct worker *worker_start(const char *name, worker_fn_t fn,

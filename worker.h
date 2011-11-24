@@ -7,8 +7,11 @@
 #ifndef CONSENSUS_FUN_WORKER_DOT_H
 #define CONSENSUS_FUN_WORKER_DOT_H
 
+#include "tree.h"
+
 #include <inttypes.h>
 #include <pthread.h>
+#include <sys/time.h> /* for struct timespec */
 
 #define WORKER_NAME_MAX 16
 
@@ -31,6 +34,13 @@ struct worker_msg
 	struct worker_msg *next;
 	/** Type of message */
 	enum worker_msg_ty ty;
+	/** If deferred, earliest time at which the recipient will receive this
+	 * message. */
+	struct timespec defer_until;
+	/** If deferred, destination worker */
+	struct worker *dst;
+	/** If deferred, pointers to other entries in the deferred tree */
+	RB_ENTRY(worker_msg) defer_entry;
 	/** Message-specific data */
 	char data[0];
 };
@@ -38,10 +48,8 @@ struct worker_msg
 /** Initialize the worker subsystem.
  *
  * Must be called before any other worker functions are called.
- *
- * @return		0 on success; error code otherwise.
  */
-int worker_init(void);
+void worker_init(void);
 
 /** Start a worker
  *
@@ -94,5 +102,24 @@ int worker_stop(struct worker *worker);
  *			Error code otherwise.
  */
 int worker_join(struct worker *worker);
+
+/** Queue a message for delivery some time after 'ts'.
+ *
+ * @param w		The worker to send to
+ * @param m		The message
+ * @param ts		The earliest time at which the message can be
+ *			delivered.  This is absolute time like what you would
+ *			get from clock_gettime(CLOCK_REALTIME, &ts);
+ */
+void worker_sendmsg_deferred(struct worker *w, void *m,
+			const struct timespec *ts);
+
+/** Queue a message for delivery no less than 'ms' milliseconds after now
+ *
+ * @param w		The worker to send to
+ * @param m		The message
+ * @param ms		Minimum number of milliseconds to wait
+ */
+void worker_sendmsg_deferred_ms(struct worker *w, void *m, int ms);
 
 #endif

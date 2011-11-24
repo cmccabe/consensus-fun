@@ -280,13 +280,14 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 	return 0;
 }
 
-static int send_do_propose(int node_id)
+static void send_do_propose(int node_id)
 {
 	struct mmm_do_propose *m;
 
 	m = xcalloc(1, sizeof(struct mmm_do_propose));
 	m->base.ty = MMM_DO_PROPOSE;
-	return worker_sendmsg_or_free(g_nodes[node_id], m);
+	worker_sendmsg_deferred_ms(g_nodes[node_id], m, 1000);
+	//return worker_sendmsg_or_free(g_nodes[node_id], m);
 }
 
 static int run_tpc(int duelling_proposers)
@@ -318,13 +319,10 @@ static int run_tpc(int duelling_proposers)
 	}
 	if (g_num_nodes < 3)
 		abort();
-	if (send_do_propose(2))
-		abort();
+	send_do_propose(2);
 	if (duelling_proposers) {
-		if (send_do_propose(0))
-			abort();
-		if (send_do_propose(1))
-			abort();
+		send_do_propose(0);
+		send_do_propose(1);
 	}
 	/* start acceptors */
 	pthread_mutex_lock(&g_start_lock);
@@ -398,23 +396,18 @@ int main(int argc, char **argv)
 
 	parse_argv(argc, argv);
 
-	ret = worker_init();
+	worker_init();
+	ret = run_tpc(0);
 	if (ret) {
-		fprintf(stderr, "failed to initialize the worker "
-			"subsystem: error %d\n", ret);
-		return EXIT_FAILURE;
-	}
-//	ret = run_tpc(0);
-//	if (ret) {
-//		fprintf(stderr, "run_tpc(0) failed with error code %d\n",
-//			ret);
-//		return EXIT_FAILURE;
-//	}
-	ret = run_tpc(1);
-	if (ret) {
-		fprintf(stderr, "run_tpc(1) failed with error code %d\n",
+		fprintf(stderr, "run_tpc(0) failed with error code %d\n",
 			ret);
 		return EXIT_FAILURE;
 	}
+//	ret = run_tpc(1);
+//	if (ret) {
+//		fprintf(stderr, "run_tpc(1) failed with error code %d\n",
+//			ret);
+//		return EXIT_FAILURE;
+//	}
 	return EXIT_SUCCESS;
 }
