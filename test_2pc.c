@@ -29,8 +29,8 @@ enum {
 
 enum node_state {
 	NODE_STATE_INIT = 0,
-	NODE_STATE_COORDINATING,
-	NODE_STATE_COORDINATING_GOT_NACK,
+	NODE_STATE_COORD,
+	NODE_STATE_COORD_GOT_NACK,
 	NODE_STATE_WAITING_FOR_COORDINATOR,
 };
 
@@ -79,6 +79,9 @@ struct mmm_commit_or_abort {
 };
 
 /************************ globals ********************************/
+/** enable debugging spew */ 
+static int g_verbose;
+
 /** acceptor nodes */
 static struct worker *g_nodes[MAX_ACCEPTORS];
 
@@ -89,6 +92,15 @@ static struct node_data g_node_data[MAX_ACCEPTORS];
 static int g_num_nodes;
 
 static sem_t g_sem_accept_leader;
+
+/** True if acceptors are running */
+static int g_start;
+
+/** Lock that protects g_start */
+pthread_mutex_t g_start_lock;
+
+/** Condition variable associated with g_start */
+pthread_cond_t g_start_cond;
 
 /************************ functions ********************************/
 static void *xcalloc(size_t nmemb, size_t size)
@@ -114,10 +126,16 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 	struct mmm_commit_or_abort *mca;
 	int i;
 
+	pthread_mutex_lock(&g_start_lock);
+	while (g_start == 0)
+		pthread_cond_wait(&g_start_cond, &g_start_lock);
+	pthread_mutex_unlock(&g_start_lock);
+
 	switch (m->ty) {
 	case MMM_DO_PROPOSE:
 		if ((me->state != NODE_STATE_INIT) ||
 				!node_is_dead(me, me->leader)) {
+			fprintf(stderr, "%d: ignoring do_propose\n", me->id);
 			break;
 		}
 		memset(me->waiting, 0, sizeof(me->waiting));
@@ -134,10 +152,13 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 				me->failed[i] = 1;
 			}
 			else {
+				if (g_verbose)
+					fprintf(stderr, "%d: sent MMM_PROPOSE to "
+						"node %d\n", me->id, i);
 				me->waiting[i] = 1;
 			}
 		}
-		me->state = NODE_STATE_COORDINATING;
+		me->state = NODE_STATE_COORD;
 		break;
 	case MMM_PROPOSE:
 		mprop = (struct mmm_propose *)m;
@@ -154,6 +175,9 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 					"we're screwed\n", me->id, mprop->src);
 				abort();
 			}
+			if (g_verbose)
+				fprintf(stderr, "%d: rejected proposal from %d\n",
+					me->id, mprop->src);
 		}
 		else {
 			struct mmm_resp *m;
@@ -167,21 +191,27 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 					"we're screwed\n", me->id, mprop->src);
 				abort();
 			}
+			if (g_verbose)
+				fprintf(stderr, "%d: accepted proposal from %d\n",
+					me->id, mprop->src);
 			me->state = NODE_STATE_WAITING_FOR_COORDINATOR;
 			me->coord = mprop->src;
 		}
 		break;
 	case MMM_RESP:
-		if (!((me->state == NODE_STATE_COORDINATING) ||
-				(me->state == NODE_STATE_COORDINATING_GOT_NACK))) {
+		if (!((me->state == NODE_STATE_COORD) ||
+				(me->state == NODE_STATE_COORD_GOT_NACK))) {
 			fprintf(stderr, "%d: got response message, but we are "
 				"not coordinating. %d\n", me->id, m->ty);
 			break;
 		}
 		mresp = (struct mmm_resp *)m;
 		me->waiting[mresp->src] = 0;
+		if (g_verbose)
+			fprintf(stderr, "%d: got %s from %d\n",
+				me->id, (mresp->ack ? "ACK" : "NACK"),  mresp->src);
 		if (mresp->ack == 0)
-			me->state = NODE_STATE_COORDINATING_GOT_NACK;
+			me->state = NODE_STATE_COORD_GOT_NACK;
 		for (i = 0; i < g_num_nodes; ++i) {
 			if (me->waiting[i] != 0)
 				break;
@@ -191,6 +221,9 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 			break;
 		}
 		/* send commit/abort message to all */
+		if (g_verbose)
+			fprintf(stderr, "%d: sending %s to everyone\n", me->id,
+				((me->state == NODE_STATE_COORD_GOT_NACK) ? "ABORT" : "COMMIT"));
 		for (i = 0; i < g_num_nodes; ++i) {
 			struct mmm_commit_or_abort *m;
 			
@@ -199,8 +232,7 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 			m = xcalloc(1, sizeof(struct mmm_commit_or_abort));
 			m->base.ty = MMM_COMMIT_OR_ABORT;
 			m->src = me->id;
-			m->leader = (me->state == 
-					NODE_STATE_COORDINATING_GOT_NACK) ? -1 : me->id;
+			m->leader = (me->state == NODE_STATE_COORD_GOT_NACK) ? -1 : me->id;
 			if (worker_sendmsg_or_free(g_nodes[i], m)) {
 				fprintf(stderr, "%d: declaring node %d as failed\n", me->id, i);
 				me->failed[i] = 1;
@@ -209,7 +241,7 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 				me->waiting[i] = 1;
 			}
 		}
-		if (me->state == NODE_STATE_COORDINATING) {
+		if (me->state == NODE_STATE_COORD) {
 			me->leader = me->id;
 			sem_post(&g_sem_accept_leader);
 		}
@@ -217,6 +249,12 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 	case MMM_COMMIT_OR_ABORT:
 		mca = (struct mmm_commit_or_abort*)m;
 		if (me->state != NODE_STATE_WAITING_FOR_COORDINATOR) {
+			if (mca->leader == -1) {
+				if (g_verbose)
+					fprintf(stderr, "%d: received ABORT from %d\n",
+						me->id, mca->src);
+				break;
+			}
 			fprintf(stderr, "%d: received MMM_COMMIT_OR_ABORT, but "
 				"we are not waiting for a coordinator.\n", me->id);
 			break;
@@ -251,12 +289,17 @@ static int send_do_propose(int node_id)
 	return worker_sendmsg_or_free(g_nodes[node_id], m);
 }
 
-static int run_tpc(void)
+static int run_tpc(int duelling_proposers)
 {
 	int i;
 
 	if (sem_init(&g_sem_accept_leader, 0, 0))
 		abort();
+	if (pthread_mutex_init(&g_start_lock, 0))
+		abort();
+	if (pthread_cond_init(&g_start_cond, 0))
+		abort();
+	g_start = 0;
 	memset(g_nodes, 0, sizeof(g_nodes));
 	memset(g_node_data, 0, sizeof(g_node_data));
 	for (i = 0; i < g_num_nodes;  ++i) {
@@ -277,16 +320,32 @@ static int run_tpc(void)
 		abort();
 	if (send_do_propose(2))
 		abort();
+	if (duelling_proposers) {
+		if (send_do_propose(0))
+			abort();
+		if (send_do_propose(1))
+			abort();
+	}
+	/* start acceptors */
+	pthread_mutex_lock(&g_start_lock);
+	g_start = 1;
+	pthread_cond_broadcast(&g_start_cond);
+	pthread_mutex_unlock(&g_start_lock);
+	/* wait for consensus */
 	for (i = 0; i < g_num_nodes; ++i) {
 		TEMP_FAILURE_RETRY(sem_wait(&g_sem_accept_leader));
 	}
 	printf("successfully elected a leader.\n");
+	/* cleanup */
 	for (i = 0; i < g_num_nodes; ++i) {
 		worker_stop(g_nodes[i]);
 	}
 	for (i = 0; i < g_num_nodes; ++i) {
 		worker_join(g_nodes[i]);
 	}
+	pthread_cond_destroy(&g_start_cond);
+	g_start = 0;
+	pthread_mutex_destroy(&g_start_lock);
 	sem_destroy(&g_sem_accept_leader);
 	return 0;
 }
@@ -297,6 +356,7 @@ static void usage(const char *argv0, int retcode)
 options:\n\
 -h:                     this help message\n\
 -n <num-nodes>          set the number of acceptors (default: %d)\n\
+-v                      enable verbose debug messages\n\
 ", argv0, DEFAULT_NUM_NODES);
 	exit(retcode);
 }
@@ -306,13 +366,18 @@ static void parse_argv(int argc, char **argv)
 	int c;
 
 	g_num_nodes = DEFAULT_NUM_NODES;
-	while ((c = getopt(argc, argv, "hn:")) != -1) {
+	g_verbose = 0;
+
+	while ((c = getopt(argc, argv, "hn:v")) != -1) {
 		switch (c) {
 		case 'h':
 			usage(argv[0], EXIT_SUCCESS);
 			break;
 		case 'n':
 			g_num_nodes = atoi(optarg);
+			break;
+		case 'v':
+			g_verbose = 1;
 			break;
 		default:
 			fprintf(stderr, "failed to parse argument.\n\n");
@@ -339,9 +404,15 @@ int main(int argc, char **argv)
 			"subsystem: error %d\n", ret);
 		return EXIT_FAILURE;
 	}
-	ret = run_tpc();
+//	ret = run_tpc(0);
+//	if (ret) {
+//		fprintf(stderr, "run_tpc(0) failed with error code %d\n",
+//			ret);
+//		return EXIT_FAILURE;
+//	}
+	ret = run_tpc(1);
 	if (ret) {
-		fprintf(stderr, "run_tpc failed with error code %d\n",
+		fprintf(stderr, "run_tpc(1) failed with error code %d\n",
 			ret);
 		return EXIT_FAILURE;
 	}
