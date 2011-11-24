@@ -374,6 +374,7 @@ static int run_tpc(int duelling_proposers)
 		TEMP_FAILURE_RETRY(sem_wait(&g_sem_accept_leader));
 	}
 	/* cleanup */
+	clear_deferred();
 	for (i = 0; i < g_num_nodes; ++i) {
 		worker_stop(g_nodes[i]);
 	}
@@ -384,7 +385,6 @@ static int run_tpc(int duelling_proposers)
 	g_start = 0;
 	pthread_mutex_destroy(&g_start_lock);
 	sem_destroy(&g_sem_accept_leader);
-
 	return check_leaders();
 }
 

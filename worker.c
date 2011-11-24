@@ -226,6 +226,18 @@ void worker_sendmsg_deferred_ms(struct worker *w, void *m, int ms)
 	worker_sendmsg_deferred(w, m, &ts);
 }
 
+void clear_deferred(void)
+{
+	struct worker_msg *m, *m_tmp;
+
+	pthread_mutex_lock(&g_deferred_lock);
+	RB_FOREACH_SAFE(m, defer_msg, &g_deferred, m_tmp) {
+		RB_REMOVE(defer_msg, &g_deferred, m);
+		free(m);
+	}
+	pthread_mutex_unlock(&g_deferred_lock);
+}
+
 void worker_init(void)
 {
 	int ret, i;

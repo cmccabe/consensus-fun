@@ -122,4 +122,10 @@ void worker_sendmsg_deferred(struct worker *w, void *m,
  */
 void worker_sendmsg_deferred_ms(struct worker *w, void *m, int ms);
 
+/** Clear all deferred messages.
+ *
+ * The memory associated with them will also be freed.
+ */
+void clear_deferred(void);
+
 #endif
