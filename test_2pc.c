@@ -135,7 +135,8 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 	case MMM_DO_PROPOSE:
 		if ((me->state != NODE_STATE_INIT) ||
 				!node_is_dead(me, me->leader)) {
-			fprintf(stderr, "%d: ignoring do_propose\n", me->id);
+			if (g_verbose)
+				fprintf(stderr, "%d: ignoring do_propose\n", me->id);
 			break;
 		}
 		memset(me->waiting, 0, sizeof(me->waiting));
@@ -245,6 +246,18 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 			me->leader = me->id;
 			sem_post(&g_sem_accept_leader);
 		}
+		else {
+			int delay;
+			struct mmm_do_propose *m;
+
+			/* Wait a bit, then try to propose ourselves as the
+			 * leader again. */
+			m = xcalloc(1, sizeof(struct mmm_do_propose));
+			m->base.ty = MMM_DO_PROPOSE;
+			delay = random() % 100;
+			worker_sendmsg_deferred_ms(g_nodes[me->id], m, delay);
+		}
+		me->state = NODE_STATE_INIT;
 		break;
 	case MMM_COMMIT_OR_ABORT:
 		mca = (struct mmm_commit_or_abort*)m;
@@ -260,9 +273,11 @@ static int tpc_handle_msg(struct worker_msg *m, void *v)
 			break;
 		}
 		if (me->coord != mca->src) {
-			fprintf(stderr, "%d: received MMM_COMMIT_OR_ABORT, but "
-				"we are waiting for node %d, not node %d\n",
-				me->id, me->coord, mca->src);
+			if (mca->leader != -1) {
+				fprintf(stderr, "%d: received MMM_COMMIT_OR_ABORT, but "
+					"we are waiting for node %d, not node %d\n",
+					me->id, me->coord, mca->src);
+			}
 			break;
 		}
 		if (mca->leader != -1) {
@@ -286,7 +301,7 @@ static void send_do_propose(int node_id)
 
 	m = xcalloc(1, sizeof(struct mmm_do_propose));
 	m->base.ty = MMM_DO_PROPOSE;
-	worker_sendmsg_deferred_ms(g_nodes[node_id], m, 1000);
+	worker_sendmsg_or_free(g_nodes[node_id], m);
 	//return worker_sendmsg_or_free(g_nodes[node_id], m);
 }
 
@@ -396,6 +411,9 @@ int main(int argc, char **argv)
 
 	parse_argv(argc, argv);
 
+	/* seed random number generator */
+	srandom(time(NULL));
+
 	worker_init();
 	ret = run_tpc(0);
 	if (ret) {
@@ -403,11 +421,11 @@ int main(int argc, char **argv)
 			ret);
 		return EXIT_FAILURE;
 	}
-//	ret = run_tpc(1);
-//	if (ret) {
-//		fprintf(stderr, "run_tpc(1) failed with error code %d\n",
-//			ret);
-//		return EXIT_FAILURE;
-//	}
+	ret = run_tpc(1);
+	if (ret) {
+		fprintf(stderr, "run_tpc(1) failed with error code %d\n",
+			ret);
+		return EXIT_FAILURE;
+	}
 	return EXIT_SUCCESS;
 }
