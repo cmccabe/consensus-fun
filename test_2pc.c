@@ -305,6 +305,31 @@ static void send_do_propose(int node_id)
 	//return worker_sendmsg_or_free(g_nodes[node_id], m);
 }
 
+static int check_leaders(void)
+{
+	int i, leader, conflict;
+
+	leader = -1;
+	conflict = 0;
+	for (i = 0; i < g_num_nodes; ++i) {
+		if (leader == -1)
+			leader = g_node_data[i].leader;
+		else {
+			if (leader != g_node_data[i].leader) {
+				conflict = 1;
+			}
+		}
+	}
+	if (!conflict) {
+		printf("successfully elected node %d as leader.\n", leader);
+		return 0;
+	}
+	for (i = 0; i < g_num_nodes; ++i) {
+		fprintf(stderr, "%d: leader = %d\n", i, g_node_data[i].leader);
+	}
+	return 1;
+}
+
 static int run_tpc(int duelling_proposers)
 {
 	int i;
@@ -348,7 +373,6 @@ static int run_tpc(int duelling_proposers)
 	for (i = 0; i < g_num_nodes; ++i) {
 		TEMP_FAILURE_RETRY(sem_wait(&g_sem_accept_leader));
 	}
-	printf("successfully elected a leader.\n");
 	/* cleanup */
 	for (i = 0; i < g_num_nodes; ++i) {
 		worker_stop(g_nodes[i]);
@@ -360,7 +384,8 @@ static int run_tpc(int duelling_proposers)
 	g_start = 0;
 	pthread_mutex_destroy(&g_start_lock);
 	sem_destroy(&g_sem_accept_leader);
-	return 0;
+
+	return check_leaders();
 }
 
 static void usage(const char *argv0, int retcode)
@@ -415,12 +440,14 @@ int main(int argc, char **argv)
 	srandom(time(NULL));
 
 	worker_init();
+	printf("testing single-proposer case...\n");
 	ret = run_tpc(0);
 	if (ret) {
 		fprintf(stderr, "run_tpc(0) failed with error code %d\n",
 			ret);
 		return EXIT_FAILURE;
 	}
+	printf("testing multi-proposer case...\n");
 	ret = run_tpc(1);
 	if (ret) {
 		fprintf(stderr, "run_tpc(1) failed with error code %d\n",
