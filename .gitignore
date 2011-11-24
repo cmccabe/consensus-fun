@@ -3,4 +3,6 @@ cscope.out
 *.swp
 *.swo
 *.pyc
+*.o
+test_2pc
 *~
