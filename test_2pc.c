@@ -6,6 +6,8 @@
 
 #define _GNU_SOURCE /* for TEMP_FAILURE_RETRY */
 
+#include "limits.h"
+#include "util.h"
 #include "worker.h"
 
 #include <errno.h>
@@ -17,9 +19,6 @@
 #include <unistd.h>
 
 /************************ constants ********************************/
-#define MAX_ACCEPTORS 128
-#define DEFAULT_NUM_NODES 5
-
 enum {
 	MMM_DO_PROPOSE = 2000,
 	MMM_PROPOSE = 3000,
@@ -103,13 +102,6 @@ pthread_mutex_t g_start_lock;
 pthread_cond_t g_start_cond;
 
 /************************ functions ********************************/
-static void *xcalloc(size_t nmemb, size_t size)
-{
-	void *ret = calloc(nmemb, size);
-	if (!ret)
-		abort();
-	return ret;
-}
 
 static int node_is_dead(struct node_data *me, int id)
 {
@@ -374,7 +366,6 @@ static int run_tpc(int duelling_proposers)
 		TEMP_FAILURE_RETRY(sem_wait(&g_sem_accept_leader));
 	}
 	/* cleanup */
-	clear_deferred();
 	for (i = 0; i < g_num_nodes; ++i) {
 		worker_stop(g_nodes[i]);
 	}
@@ -385,6 +376,7 @@ static int run_tpc(int duelling_proposers)
 	g_start = 0;
 	pthread_mutex_destroy(&g_start_lock);
 	sem_destroy(&g_sem_accept_leader);
+
 	return check_leaders();
 }
 
