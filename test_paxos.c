@@ -206,7 +206,7 @@ static void reset_remotes(uint8_t *remotes)
 
 static int check_acceptor_resp(const struct node_data *me, int ty, int src)
 {
-	if (!me->state != NODE_STATE_PROPOSING) {
+	if (me->state != NODE_STATE_PROPOSING) {
 		fprintf(stderr, "%d: got %s message from %d, but we are "
 			"not proposing.\n",
 			me->id, msg_type_to_str(ty), src);
@@ -268,6 +268,12 @@ static void send_commits(struct node_data *me)
 		mcom->src = me->id;
 		mcom->prop_leader = me->prop_leader;
 		mcom->prop_pseq = me->prop_pseq;
+		if (g_verbose) {
+			fprintf(stderr, "%d: sending COMMIT (prop_leader=%d, "
+				"prop_pseq=%"PRId64 ") message to %d\n",
+				me->id, mcom->prop_leader, mcom->prop_pseq, i);
+
+		}
 		if (worker_sendmsg_or_free(g_nodes[i], mcom)) {
 			fprintf(stderr, "%d: declaring node %d as failed\n", me->id, i);
 			me->remotes[i] = REMOTE_STATE_FAILED;
@@ -336,6 +342,7 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 		}
 		reset_remotes(me->remotes);
 		me->prop_pseq  = me->seen_pseq = outbid(me->seen_pseq, me->id);
+		me->prop_leader = me->id;
 		for (i = 0; i < g_num_nodes; ++i) {
 			if (i == me->id)
 				continue;
