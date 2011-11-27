@@ -5,4 +5,5 @@ cscope.out
 *.pyc
 *.o
 test_2pc
+test_paxos
 *~
