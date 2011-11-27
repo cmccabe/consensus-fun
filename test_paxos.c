@@ -236,13 +236,22 @@ static int have_majority_of_acceptors(const struct node_data *me)
 
 static void send_delayed_do_propose(struct node_data *me)
 {
-	struct mmm_do_propose *m;
+	struct mmm_do_propose *mdop;
 	int delay;
 
-	m = xcalloc(1, sizeof(struct mmm_do_propose));
-	m->base.ty = MMM_DO_PROPOSE;
+	mdop = xcalloc(1, sizeof(struct mmm_do_propose));
+	mdop->base.ty = MMM_DO_PROPOSE;
 	delay = random() % 100;
-	worker_sendmsg_deferred_ms(g_nodes[me->id], m, delay);
+	worker_sendmsg_deferred_ms(g_nodes[me->id], mdop, delay);
+}
+
+static void send_do_propose(int node_id)
+{
+	struct mmm_do_propose *mdop;
+
+	mdop = xcalloc(1, sizeof(struct mmm_do_propose));
+	mdop->base.ty = MMM_DO_PROPOSE;
+	worker_sendmsg_or_free(g_nodes[node_id], mdop);
 }
 
 static void send_commits(struct node_data *me)
@@ -250,16 +259,16 @@ static void send_commits(struct node_data *me)
 	int i;
 
 	for (i = 0; i < g_num_nodes; ++i) {
-		struct mmm_commit *m;
+		struct mmm_commit *mcom;
 
 		if (i == me->id)
 			continue;
-		m = xcalloc(1, sizeof(struct mmm_commit));
-		m->base.ty = MMM_COMMIT;
-		m->src = me->id;
-		m->prop_leader = me->prop_leader;
-		m->prop_pseq = me->prop_pseq;
-		if (worker_sendmsg_or_free(g_nodes[i], m)) {
+		mcom = xcalloc(1, sizeof(struct mmm_commit));
+		mcom->base.ty = MMM_COMMIT;
+		mcom->src = me->id;
+		mcom->prop_leader = me->prop_leader;
+		mcom->prop_pseq = me->prop_pseq;
+		if (worker_sendmsg_or_free(g_nodes[i], mcom)) {
 			fprintf(stderr, "%d: declaring node %d as failed\n", me->id, i);
 			me->remotes[i] = REMOTE_STATE_FAILED;
 		}
@@ -328,16 +337,14 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 		reset_remotes(me->remotes);
 		me->prop_pseq  = me->seen_pseq = outbid(me->seen_pseq, me->id);
 		for (i = 0; i < g_num_nodes; ++i) {
-			struct mmm_propose *m;
-
 			if (i == me->id)
 				continue;
-			m = xcalloc(1, sizeof(struct mmm_propose));
-			m->base.ty = MMM_PROPOSE;
-			m->src = me->id;
-			m->prop_leader = me->id;
-			m->prop_pseq = me->prop_pseq;
-			if (worker_sendmsg_or_free(g_nodes[i], m)) {
+			mprop = xcalloc(1, sizeof(struct mmm_propose));
+			mprop->base.ty = MMM_PROPOSE;
+			mprop->src = me->id;
+			mprop->prop_leader = me->id;
+			mprop->prop_pseq = me->prop_pseq;
+			if (worker_sendmsg_or_free(g_nodes[i], mprop)) {
 				fprintf(stderr, "%d: declaring node %d as failed\n", me->id, i);
 				me->remotes[i] = REMOTE_STATE_FAILED;
 			}
@@ -385,7 +392,7 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 			mrej->base.ty = MMM_REJECT;
 			mrej->src = me->id;
 			mrej->seen_pseq = me->seen_pseq;
-			if (worker_sendmsg_or_free(g_nodes[mprop->src], m)) {
+			if (worker_sendmsg_or_free(g_nodes[mprop->src], mrej)) {
 				me->remotes[mprop->src] = REMOTE_STATE_FAILED;
 			}
 			if (g_verbose)
@@ -400,7 +407,7 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 			macc->base.ty = MMM_ACCEPT;
 			macc->src = me->id;
 			macc->prop_leader = me->prop_leader;
-			if (worker_sendmsg_or_free(g_nodes[mprop->src], m)) {
+			if (worker_sendmsg_or_free(g_nodes[mprop->src], macc)) {
 				me->remotes[mprop->src] = REMOTE_STATE_FAILED;
 			}
 		}
@@ -470,16 +477,6 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 		break;
 	}
 	return 0;
-}
-
-static void send_do_propose(int node_id)
-{
-	struct mmm_do_propose *m;
-
-	m = xcalloc(1, sizeof(struct mmm_do_propose));
-	m->base.ty = MMM_DO_PROPOSE;
-	worker_sendmsg_or_free(g_nodes[node_id], m);
-	//return worker_sendmsg_or_free(g_nodes[node_id], m);
 }
 
 static int check_leaders(void)
