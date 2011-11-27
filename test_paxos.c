@@ -270,7 +270,7 @@ static void send_commits(struct node_data *me)
 		mcom->prop_pseq = me->prop_pseq;
 		if (g_verbose) {
 			fprintf(stderr, "%d: sending COMMIT (prop_leader=%d, "
-				"prop_pseq=%"PRId64 ") message to %d\n",
+				"prop_pseq=0x%"PRIx64 ") message to %d\n",
 				me->id, mcom->prop_leader, mcom->prop_pseq, i);
 
 		}
@@ -298,7 +298,7 @@ static int check_commit_resp(const struct node_data *me,
 	if (mresp->prop_pseq != me->prop_pseq) {
 		if (g_verbose) {
 			fprintf(stderr, "%d: got MMM_COMMIT_RESP from %d, but "
-				"mresp->prop_pseq is %"PRId64 ", not %"PRId64"\n",
+				"mresp->prop_pseq is 0x%"PRIx64 ", not 0x%"PRIx64"\n",
 				me->id, mresp->src, mresp->prop_pseq, me->prop_pseq);
 		}
 		return 1;
@@ -374,12 +374,12 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 		    		(me->state != NODE_STATE_PROPOSING)) {
 			if (g_verbose) {
 				fprintf(stderr, "%d: ignoring timeout for defunct "
-					"pseq %"PRId64"\n", me->id, mtimeo->prop_pseq);
+					"pseq 0x%"PRIx64"\n", me->id, mtimeo->prop_pseq);
 			}
 			break;
 		}
 		if (g_verbose) {
-			fprintf(stderr, "%d: abaondoning proposal %"PRId64"\n",
+			fprintf(stderr, "%d: abaondoning proposal 0x%"PRIx64"\n",
 				me->id, me->prop_pseq);
 		}
 		me->prop_pseq = -1;
@@ -438,8 +438,8 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 		if (check_acceptor_resp(me, MMM_REJECT, mrej->src))
 			break;
 		if (g_verbose) {
-			fprintf(stderr, "%d: got MMM_REJECT (seen_pseq=%"
-				PRId64") from %d\n", me->id, mrej->seen_pseq, mrej->src);
+			fprintf(stderr, "%d: got MMM_REJECT (seen_pseq=0x%"
+				PRIx64") from %d\n", me->id, mrej->seen_pseq, mrej->src);
 		}
 		me->remotes[mrej->src] = REMOTE_STATE_REJECTED;
 		break;
