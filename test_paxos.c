@@ -103,6 +103,9 @@ struct mmm_accept {
 	int src;
 	/** The leader that we are accepting */
 	int prop_leader;
+	/** The sequence number of the coordinator from which we heard this
+	 * prop_leader */
+	uint64_t seen_pseq;
 };
 
 struct mmm_commit {
@@ -207,9 +210,11 @@ static void reset_remotes(uint8_t *remotes)
 static int check_acceptor_resp(const struct node_data *me, int ty, int src)
 {
 	if (me->state != NODE_STATE_PROPOSING) {
-		fprintf(stderr, "%d: got %s message from %d, but we are "
-			"not proposing.\n",
-			me->id, msg_type_to_str(ty), src);
+		if (g_verbose) {
+			fprintf(stderr, "%d: got %s message from %d, but we are "
+				"not proposing.\n",
+				me->id, msg_type_to_str(ty), src);
+		}
 		return 1;
 	}
 	if (me->remotes[src] != REMOTE_STATE_NO_RESP) {
@@ -320,6 +325,7 @@ static int check_commit_resp(const struct node_data *me,
 
 static void accept_leader(struct node_data *me, int leader)
 {
+	me->prop_leader = leader;
 	me->leader = leader;
 	sem_post(&g_sem_accept_leader);
 	me->state = NODE_STATE_INIT;
@@ -420,19 +426,37 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 				me->remotes[mprop->src] = REMOTE_STATE_FAILED;
 			}
 			if (g_verbose)
-				fprintf(stderr, "%d: rejected proposal from %d\n",
-					me->id, mprop->src);
+				fprintf(stderr, "%d: rejected proposal (mprop->leader = %d, "
+					"mprop->seen_pseq = 0x%"PRIx64 ") from %d "
+					"(me->leader = %d, me->seen_pseq = 0x%"PRIx64")\n",
+					me->id, mprop->prop_leader, mprop->prop_pseq,
+					mprop->src, me->leader, me->seen_pseq);
 		}
 		else {
-			if (mprop->prop_leader > me->prop_leader)
-				me->prop_leader = mprop->prop_leader;
-			me->seen_pseq = mprop->prop_pseq;
 			macc = xcalloc(1, sizeof(struct mmm_accept));
+			if (me->prop_leader == -1) {
+				macc->prop_leader = -1;
+				macc->seen_pseq = 0;
+			}
+			else {
+				macc->prop_leader = me->prop_leader;
+				macc->seen_pseq = me->seen_pseq;
+			}
+			me->prop_leader = mprop->prop_leader;
+			me->seen_pseq = mprop->prop_pseq;
 			macc->base.ty = MMM_ACCEPT;
 			macc->src = me->id;
-			macc->prop_leader = me->prop_leader;
 			if (worker_sendmsg_or_free(g_nodes[mprop->src], macc)) {
 				me->remotes[mprop->src] = REMOTE_STATE_FAILED;
+			}
+			if (me->state != NODE_STATE_INIT) {
+				if (g_verbose) {
+					fprintf(stderr, "%d: giving up on proposing "
+						"because node %d had a proposal with a "
+						"higher sequence number\n",
+						me->id, mprop->src);
+				}
+				me->state = NODE_STATE_INIT;
 			}
 		}
 		break;
@@ -469,13 +493,17 @@ static int paxos_handle_msg(struct worker_msg *m, void *v)
 		mresp->src = me->id;
 		mresp->prop_pseq = mcom->prop_pseq;
 		if ((me->state != NODE_STATE_INIT) ||
-			    (mcom->prop_leader != me->prop_leader) ||
+				(mcom->prop_leader != me->prop_leader) ||
 				(mcom->prop_pseq < me->prop_pseq)) {
 			mresp->ack = 0;
 		}
 		else {
 			mresp->ack = 1;
 			accept_leader(me, mcom->prop_leader);
+		}
+		if (g_verbose) {
+			fprintf(stderr, "%d: sending commit %s back to %d\n",
+				me->id, (mresp->ack ? "ACK" : "NACK"), mcom->src);
 		}
 		if (worker_sendmsg_or_free(g_nodes[mcom->src], mresp)) {
 			me->remotes[mcom->src] = REMOTE_STATE_FAILED;
@@ -533,6 +561,7 @@ static int check_leaders(void)
 static int run_paxos(int duelling_proposers)
 {
 	int i;
+	struct timespec ts;
 
 	if (sem_init(&g_sem_accept_leader, 0, 0))
 		abort();
@@ -548,8 +577,12 @@ static int run_paxos(int duelling_proposers)
 
 		snprintf(name, WORKER_NAME_MAX, "node_%3d", i);
 		g_node_data[i].id = i;
-		g_node_data[i].leader = -1;
+		g_node_data[i].state = NODE_STATE_INIT;
+		reset_remotes(g_node_data[i].remotes);
+		g_node_data[i].seen_pseq = 0;
+		g_node_data[i].prop_pseq = 0;
 		g_node_data[i].prop_leader = -1;
+		g_node_data[i].leader = -1;
 		g_nodes[i] = worker_start(name, paxos_handle_msg,
 				NULL, &g_node_data[i]);
 		if (!g_nodes[i]) {
@@ -569,9 +602,18 @@ static int run_paxos(int duelling_proposers)
 	g_start = 1;
 	pthread_cond_broadcast(&g_start_cond);
 	pthread_mutex_unlock(&g_start_lock);
-	/* wait for consensus */
-	for (i = 0; i < g_num_nodes; ++i) {
+	/* Wait for consensus.
+	 * We only actually need more than half the nodes.  However, to make
+	 * debugging a little nicer, we'll wait 10 seconds for all the remaining
+	 * nodes rather than exiting immediately after we get half. */
+	for (i = 0; i < 1 + (g_num_nodes / 2); ++i) {
 		TEMP_FAILURE_RETRY(sem_wait(&g_sem_accept_leader));
+	}
+	if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
+		abort();
+	ts.tv_sec += 10;
+	for (; i < g_num_nodes; ++i) {
+		TEMP_FAILURE_RETRY(sem_timedwait(&g_sem_accept_leader, &ts));
 	}
 	/* cleanup */
 	for (i = 0; i < g_num_nodes; ++i) {
@@ -641,12 +683,12 @@ int main(int argc, char **argv)
 
 	worker_init();
 	printf("testing single-proposer case...\n");
-//	ret = run_paxos(0);
-//	if (ret) {
-//		fprintf(stderr, "run_paxos(0) failed with error code %d\n",
-//			ret);
-//		return EXIT_FAILURE;
-//	}
+	ret = run_paxos(0);
+	if (ret) {
+		fprintf(stderr, "run_paxos(0) failed with error code %d\n",
+			ret);
+		return EXIT_FAILURE;
+	}
 	printf("testing multi-proposer case...\n");
 	ret = run_paxos(1);
 	if (ret) {
