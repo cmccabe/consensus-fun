@@ -3,7 +3,23 @@ consensus-fun
 This is a sample implementation of some distributed consensus protocols.
 
 Currently implemented:
-two-phase commit
+* Two-phase commit
+* Paxos
+
+In both of these tests, the nodes vote on which node should be the "leader" of
+the cluster.  Nodes are represented by operating system threads.  One node
+sending a message to another node is represented by putting the message into a
+queue and posting a semaphore.
+
+Nodes can send messages with a delay value.  This means that the messages will
+be delivered after a timeout period has elapsed.  For example, a node could
+send a delayed message to itself in order to implement a timeout.  Nodes can
+also put delays on messages they send to other nodes in order to stress-test
+the implementation a bit.
+
+TODO:
+* stress-test implementation by injecting message delays
+* model and test node failure for Paxos
 
 This is licensed under the Apache License 2.0.  See LICENSE for details.
 
